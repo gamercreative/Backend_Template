@@ -1,0 +1,76 @@
+// Source of truth for the data model. Keep in sync with db/migrations/*.up.sql
+// and internal/queries/models.go. Paste into dbdiagram.io to view.
+
+Project alphahack {
+  database_type: 'PostgreSQL'
+  Note: 'Agent backend: agents own conversations; each user turn creates a run with a tool-call trace.'
+}
+
+Table agents {
+  id text [pk, default: `gen_random_uuid()::text`]
+  name text [not null, note: 'non-empty']
+  system_prompt text [not null, default: '']
+  model text [not null, default: '', note: 'empty = server default (ANTHROPIC_MODEL)']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+}
+
+Table conversations {
+  id text [pk, default: `gen_random_uuid()::text`]
+  agent_id text [not null, ref: > agents.id, note: 'ON DELETE CASCADE']
+  title text [not null, default: '']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`, note: 'bumped on every new message']
+
+  indexes {
+    (agent_id, created_at) [name: 'conversations_agent_idx']
+  }
+}
+
+Table runs {
+  id text [pk, default: `gen_random_uuid()::text`]
+  conversation_id text [not null, ref: > conversations.id, note: 'ON DELETE CASCADE']
+  status text [not null, default: 'running', note: 'running | completed | failed']
+  stop_reason text [not null, default: '', note: 'end_turn | max_tokens | refusal | max_iterations | ...']
+  error text [not null, default: '']
+  model text [not null, default: '']
+  input_tokens bigint [not null, default: 0]
+  output_tokens bigint [not null, default: 0]
+  iterations integer [not null, default: 0, note: 'model round-trips in the agent loop']
+  started_at timestamptz [not null, default: `now()`]
+  finished_at timestamptz [null]
+
+  indexes {
+    (conversation_id, started_at) [name: 'runs_conversation_idx']
+  }
+}
+
+Table messages {
+  id text [pk, default: `gen_random_uuid()::text`]
+  seq bigint [not null, increment, note: 'stable ordering within a conversation']
+  conversation_id text [not null, ref: > conversations.id, note: 'ON DELETE CASCADE']
+  run_id text [null, ref: > runs.id, note: 'ON DELETE SET NULL']
+  role text [not null, note: 'user | assistant']
+  content text [not null]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (conversation_id, seq) [name: 'messages_conversation_seq_idx']
+  }
+}
+
+Table tool_calls {
+  id text [pk, default: `gen_random_uuid()::text`]
+  seq bigint [not null, increment]
+  run_id text [not null, ref: > runs.id, note: 'ON DELETE CASCADE']
+  name text [not null]
+  input jsonb [not null, default: '{}']
+  output text [not null, default: '']
+  is_error boolean [not null, default: false]
+  duration_ms integer [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (run_id, seq) [name: 'tool_calls_run_seq_idx']
+  }
+}

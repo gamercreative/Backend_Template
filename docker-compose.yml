@@ -1,0 +1,60 @@
+# `make up`        starts only the database (run the server on the host with `make run`).
+# `make docker-up` builds and starts everything: db -> migrate -> app.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: alphahack
+      POSTGRES_PASSWORD: alphahack
+      POSTGRES_DB: alphahack
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphahack -d alphahack"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: applies pending migrations, then exits 0.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: postgres://alphahack:alphahack@db:5432/alphahack?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: server
+    # Optional: everything in .env (AI_PROVIDER, models, keys ...) is passed in.
+    env_file:
+      - path: .env
+        required: false
+    # These always win over .env, because inside a container "localhost" is
+    # the container itself, not your machine.
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://alphahack:alphahack@db:5432/alphahack?sslmode=disable
+      # Ollama keeps running on the host (it needs the GPU); the container
+      # reaches it through host.docker.internal.
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

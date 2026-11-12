@@ -1,0 +1,445 @@
+openapi: 3.0.3
+info:
+  title: Alphahack Agent Backend
+  version: 0.1.0
+  description: >
+    Agents, conversations, messages and agent runs with a tool-call trace.
+    Every non-2xx response uses the Error schema.
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness and database reachability
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /v1/agents:
+    get:
+      summary: List agents (newest first)
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Agent" }
+        "400": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create an agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAgent" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /v1/agents/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      summary: Get an agent
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update an agent (only the fields present are changed)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateAgent" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Agent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete an agent and everything under it
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/conversations:
+    get:
+      summary: List conversations (most recently active first)
+      parameters:
+        - name: agent_id
+          in: query
+          schema: { type: string }
+          description: Only conversations of this agent
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Conversation" }
+        "400": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Start a conversation with an agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateConversation" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Conversation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/conversations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      summary: Get a conversation
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Conversation" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a conversation with its messages and runs
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/conversations/{id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      summary: List messages (oldest first)
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Send a user message and run the agent
+      description: >
+        Synchronous: stores the user message, runs the agent loop (model calls
+        plus tool calls) and returns the assistant reply with the run and its
+        tool-call trace. Can take a long time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendMessage" }
+      responses:
+        "201":
+          description: The agent replied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+
+  /v1/conversations/{id}/messages/stream:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    post:
+      summary: Send a user message and stream the agent turn (server-sent events)
+      description: |
+        Same request as POST /messages, answered as a text/event-stream.
+        Errors that happen before the turn starts (bad body, unknown
+        conversation) are ordinary JSON errors with their real status.
+        Once the stream is open the status is 200 and the events are:
+
+        | event         | data                                                    |
+        |---------------|---------------------------------------------------------|
+        | `start`       | `{"run": Run, "user_message": Message}`                 |
+        | `delta`       | `{"text": "..."}` assistant text chunk                  |
+        | `thinking`    | `{"text": "..."}` model reasoning chunk (if exposed)    |
+        | `tool_call`   | same shape as `tool_result`, output fields still empty  |
+        | `tool_result` | `{"name", "input", "output", "is_error", "duration_ms"}`|
+        | `done`        | ChatResult (same body as the non-streaming route)       |
+        | `error`       | Error (same body as any other failure); ends the stream |
+
+        Exactly one of `done` or `error` is sent last. Text deltas cover every
+        model call of the turn, including text written before tool calls.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendMessage" }
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/conversations/{id}/runs:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      summary: List runs of a conversation (newest first)
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListMeta"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Run" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/runs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ID"
+    get:
+      summary: Get a run with its tool calls
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunDetail" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/tools:
+    get:
+      summary: List the tools the agent can call
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tool" }
+
+components:
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - validation_failed
+                - not_found
+                - method_not_allowed
+                - conflict
+                - internal_error
+                - upstream_error
+                - timeout
+            message: { type: string }
+            request_id: { type: string }
+
+    ListMeta:
+      type: object
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+
+    Agent:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        system_prompt: { type: string }
+        model: { type: string, description: Empty means the server default model }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateAgent:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        system_prompt: { type: string, maxLength: 100000 }
+        model: { type: string }
+
+    UpdateAgent:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        system_prompt: { type: string, maxLength: 100000 }
+        model: { type: string }
+
+    Conversation:
+      type: object
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CreateConversation:
+      type: object
+      required: [agent_id]
+      properties:
+        agent_id: { type: string }
+        title: { type: string, maxLength: 200 }
+
+    Message:
+      type: object
+      properties:
+        id: { type: string }
+        conversation_id: { type: string }
+        run_id: { type: string, nullable: true }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        created_at: { type: string, format: date-time }
+
+    SendMessage:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 100000 }
+
+    Run:
+      type: object
+      properties:
+        id: { type: string }
+        conversation_id: { type: string }
+        status: { type: string, enum: [running, completed, failed] }
+        stop_reason: { type: string, example: end_turn }
+        error: { type: string }
+        model: { type: string }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        iterations: { type: integer }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+
+    ToolCall:
+      type: object
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        name: { type: string }
+        input: { type: object, additionalProperties: true }
+        output: { type: string }
+        is_error: { type: boolean }
+        duration_ms: { type: integer }
+        created_at: { type: string, format: date-time }
+
+    RunDetail:
+      allOf:
+        - $ref: "#/components/schemas/Run"
+        - type: object
+          properties:
+            tool_calls:
+              type: array
+              items: { $ref: "#/components/schemas/ToolCall" }
+
+    ChatResult:
+      type: object
+      properties:
+        user_message: { $ref: "#/components/schemas/Message" }
+        assistant_message: { $ref: "#/components/schemas/Message" }
+        run: { $ref: "#/components/schemas/Run" }
+        tool_calls:
+          type: array
+          items: { $ref: "#/components/schemas/ToolCall" }
+
+    Tool:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        input_schema: { type: object, additionalProperties: true }
