@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 	"unicode/utf8"
 
 	"alphahack/internal/ai"
@@ -15,6 +16,12 @@ const (
 	chatDefaultHistoryLimit = 40
 	chatMaxRunErrorLen      = 2000
 )
+
+// chatPersistTimeout bounds the writes made after the model call. They run on a
+// context detached from the request's cancellation (the model work is already
+// paid for), which also drops its deadline, so without this a hung database
+// would hold the request forever. A var so tests can shorten it.
+var chatPersistTimeout = 30 * time.Second
 
 type chatService struct {
 	store  ChatStore
@@ -135,7 +142,8 @@ func (s *chatService) send(ctx context.Context, conversationID string, in SendMe
 	if finalModel == "" {
 		finalModel = model
 	}
-	pctx := context.WithoutCancel(ctx)
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatPersistTimeout)
+	defer cancel()
 	out := &ChatResult{UserMessage: userMsg, ToolCalls: []queries.ToolCall{}}
 	err = s.store.InTx(pctx, func(q queries.Querier) error {
 		calls, err := chatStoreToolCalls(pctx, q, run.ID, res.ToolCalls)
@@ -181,7 +189,8 @@ func (s *chatService) send(ctx context.Context, conversationID string, in SendMe
 // transaction, detached from the request's cancellation. Errors are logged:
 // the caller already has a more relevant error to return.
 func (s *chatService) failRun(ctx context.Context, run queries.Run, model string, partial *ai.Result, cause error) {
-	pctx := context.WithoutCancel(ctx)
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatPersistTimeout)
+	defer cancel()
 	p := queries.FinishRunParams{
 		ID:     run.ID,
 		Status: queries.RunStatusFailed,
